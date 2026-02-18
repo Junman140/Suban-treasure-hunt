@@ -1,6 +1,6 @@
 # ZK Treasure Hunt on Stellar
 
-A zero-knowledge Treasure Hunt game built on [Stellar Game Studio](https://github.com/jamesbachini/Stellar-Game-Studio).
+A zero-knowledge Treasure Hunt game built on [Stellar Game Studio](https://github.com/Junman140/Suban-treasure-hunt).
 
 ## What Makes This ZK-Native
 

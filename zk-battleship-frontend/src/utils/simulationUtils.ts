@@ -35,6 +35,36 @@ async function ensureTestnetAccountFunded(address: string): Promise<void> {
   throw new Error(`Funded ${address} but it still doesn't appear on Horizon yet`);
 }
 
+/**
+ * Check if an account exists and is funded on testnet. On mainnet returns true (not applicable).
+ */
+export async function isTestnetAccountFunded(address: string): Promise<boolean> {
+  if (NETWORK !== 'testnet') return true;
+  return horizonAccountExists(address);
+}
+
+/**
+ * Fund a testnet account via Friendbot. Only call on testnet; only for the connected user's address.
+ */
+export async function fundTestnetAccount(address: string): Promise<void> {
+  if (NETWORK !== 'testnet') {
+    throw new Error('Funding is only available on testnet.');
+  }
+  if (await horizonAccountExists(address)) return;
+
+  const fundRes = await fetch(`https://friendbot.stellar.org?addr=${address}`, { method: 'GET' });
+  if (!fundRes.ok) {
+    throw new Error(`Friendbot funding failed (${fundRes.status}) for ${address}`);
+  }
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await new Promise((r) => setTimeout(r, 750));
+    if (await horizonAccountExists(address)) return;
+  }
+
+  throw new Error(`Funded ${address} but it still doesn't appear on Horizon yet`);
+}
+
 export async function getSimulationSourceAddress(avoidAddresses: string[] = []): Promise<string> {
   const avoid = new Set(avoidAddresses.filter(Boolean));
   // Prefer explicit runtime config, then admin as it is most likely to exist (created/funded during deploy).
