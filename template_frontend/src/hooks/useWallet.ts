@@ -144,12 +144,35 @@ export function useWallet() {
   }, [setWallet, setConnecting, setError, setNetwork]);
 
   /**
-   * Connect with embedded wallet (user-provided secret in sessionStorage, signs in-browser)
+   * Create a new local game wallet (Keypair.random(), store in localStorage)
+   */
+  const connectEmbeddedCreate = useCallback(async () => {
+    if (typeof window === 'undefined') {
+      setError('Local wallet is only available in the browser.');
+      return;
+    }
+    try {
+      setConnecting(true);
+      setError(null);
+      const address = embeddedWalletService.generateAndStore();
+      setWallet(address, 'embedded', 'embedded');
+      setNetwork(NETWORK, NETWORK_PASSPHRASE);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to create wallet';
+      setError(message);
+      throw err;
+    } finally {
+      setConnecting(false);
+    }
+  }, [setWallet, setConnecting, setError, setNetwork]);
+
+  /**
+   * Import secret key into local wallet (store in localStorage)
    */
   const connectEmbedded = useCallback(
     async (secret: string) => {
       if (typeof window === 'undefined') {
-        setError('Embedded wallet is only available in the browser.');
+        setError('Local wallet is only available in the browser.');
         return;
       }
       try {
@@ -164,7 +187,7 @@ export function useWallet() {
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Invalid secret key';
         setError(message);
-        console.error('Embedded wallet connection error:', err);
+        console.error('Local wallet import error:', err);
         throw err;
       } finally {
         setConnecting(false);
@@ -174,14 +197,38 @@ export function useWallet() {
   );
 
   /**
-   * Disconnect wallet
+   * Restore from saved local wallet (localStorage)
+   */
+  const restoreLocalWallet = useCallback(async () => {
+    if (!embeddedWalletService.hasStoredSecret()) return;
+    try {
+      setConnecting(true);
+      setError(null);
+      const address = embeddedWalletService.getPublicKey();
+      setWallet(address, 'embedded', 'embedded');
+      setNetwork(NETWORK, NETWORK_PASSPHRASE);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to restore wallet');
+      embeddedWalletService.clear();
+    } finally {
+      setConnecting(false);
+    }
+  }, [setWallet, setConnecting, setError, setNetwork]);
+
+  /**
+   * Clear saved local wallet from localStorage and disconnect
+   */
+  const clearLocalWallet = useCallback(() => {
+    embeddedWalletService.clear();
+    if (walletType === 'embedded') storeDisconnect();
+  }, [walletType, storeDisconnect]);
+
+  /**
+   * Disconnect (local wallet stays in localStorage until "Clear saved wallet")
    */
   const disconnect = useCallback(async () => {
     if (walletType === 'dev') {
       devWalletService.disconnect();
-    }
-    if (walletType === 'embedded') {
-      embeddedWalletService.clear();
     }
     storeDisconnect();
   }, [walletType, storeDisconnect]);
@@ -268,6 +315,8 @@ export function useWallet() {
     return DevWalletService.isPlayerAvailable(playerNumber);
   }, []);
 
+  const hasStoredLocalWallet = useCallback(() => embeddedWalletService.hasStoredSecret(), []);
+
   /**
    * Get current dev player number
    */
@@ -292,7 +341,11 @@ export function useWallet() {
     // Actions
     connectDev,
     connectWallet,
+    connectEmbeddedCreate,
     connectEmbedded,
+    restoreLocalWallet,
+    clearLocalWallet,
+    hasStoredLocalWallet,
     switchPlayer,
     disconnect,
     getContractSigner,

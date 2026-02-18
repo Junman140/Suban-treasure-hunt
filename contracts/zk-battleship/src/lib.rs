@@ -81,10 +81,17 @@ pub struct Game {
     pub commitment2: Option<BytesN<32>>,
     pub phase: GamePhase,
     pub current_turn: u32, // 1 or 2 (whose turn to fire)
-    pub pending_shot: Option<(u32, u32)>, // (x,y) awaiting response
+    pub pending_shot: Option<Vec<u32>>, // [x, y] awaiting response (length 2)
     pub shots_by_player1: Vec<Shot>, // shots P1 fired at P2's board
     pub shots_by_player2: Vec<Shot>, // shots P2 fired at P1's board
     pub winner: Option<Address>,
+    // Level/config (None = legacy start_game: 5 hits, no cap, no timeout)
+    pub level: Option<u32>,
+    pub target_hits: Option<u32>,
+    pub max_shots_per_player: Option<u32>,
+    pub turn_timeout_ledgers: Option<u32>,
+    pub turn_deadline_ledger: Option<u32>,
+    pub sudden_death: Option<bool>,
 }
 
 #[contracttype]
@@ -165,6 +172,90 @@ impl ZkBattleshipContract {
             shots_by_player1: vec![&env],
             shots_by_player2: vec![&env],
             winner: None,
+            level: None,
+            target_hits: None,
+            max_shots_per_player: None,
+            turn_timeout_ledgers: None,
+            turn_deadline_ledger: None,
+            sudden_death: None,
+        };
+
+        let key = DataKey::Game(session_id);
+        env.storage().temporary().set(&key, &game);
+        env.storage().temporary().extend_ttl(&key, GAME_TTL_LEDGERS, GAME_TTL_LEDGERS);
+        Ok(())
+    }
+
+    /// Start a new game with level (1 = Quick Hunt, 2 = Classic Timed). Both players must then call commit_board.
+    pub fn start_game_v2(
+        env: Env,
+        session_id: u32,
+        player1: Address,
+        player2: Address,
+        player1_points: i128,
+        player2_points: i128,
+        level: u32,
+    ) -> Result<(), Error> {
+        if player1 == player2 {
+            panic!("Cannot play against yourself");
+        }
+        if level == 0 || level > 2 {
+            panic!("Invalid level");
+        }
+
+        player1.require_auth_for_args(vec![
+            &env,
+            session_id.into_val(&env),
+            player1_points.into_val(&env),
+            level.into_val(&env),
+        ]);
+        player2.require_auth_for_args(vec![
+            &env,
+            session_id.into_val(&env),
+            player2_points.into_val(&env),
+            level.into_val(&env),
+        ]);
+
+        let (target_hits, max_shots_per_player, turn_timeout_ledgers) = match level {
+            1 => (3u32, 20u32, 0u32),   // Quick Hunt
+            2 => (5u32, 0u32, 120u32),  // Classic Timed
+            _ => (5u32, 0u32, 0u32),
+        };
+
+        let game_hub_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::GameHubAddress)
+            .expect("GameHub address not set");
+        let game_hub = GameHubClient::new(&env, &game_hub_addr);
+        game_hub.start_game(
+            &env.current_contract_address(),
+            &session_id,
+            &player1,
+            &player2,
+            &player1_points,
+            &player2_points,
+        );
+
+        let game = Game {
+            player1: player1.clone(),
+            player2: player2.clone(),
+            player1_points,
+            player2_points,
+            commitment1: None,
+            commitment2: None,
+            phase: GamePhase::WaitingCommits,
+            current_turn: 1,
+            pending_shot: None,
+            shots_by_player1: vec![&env],
+            shots_by_player2: vec![&env],
+            winner: None,
+            level: Some(level),
+            target_hits: Some(target_hits),
+            max_shots_per_player: Some(max_shots_per_player),
+            turn_timeout_ledgers: Some(turn_timeout_ledgers),
+            turn_deadline_ledger: None,
+            sudden_death: Some(false),
         };
 
         let key = DataKey::Game(session_id);
@@ -213,6 +304,10 @@ impl ZkBattleshipContract {
 
         if game.commitment1.is_some() && game.commitment2.is_some() {
             game.phase = GamePhase::Active;
+            let timeout = game.turn_timeout_ledgers.unwrap_or(0);
+            if timeout > 0 {
+                game.turn_deadline_ledger = Some(env.ledger().sequence() + timeout);
+            }
         }
 
         env.storage().temporary().set(&key, &game);
@@ -266,7 +361,17 @@ impl ZkBattleshipContract {
             }
         }
 
-        game.pending_shot = Some((x, y));
+        let max_shots = game.max_shots_per_player.unwrap_or(0);
+        let sudden_death = game.sudden_death.unwrap_or(false);
+        if max_shots > 0 && !sudden_death && shots.len() >= max_shots as u32 {
+            return Err(Error::InvalidPhase); // shot cap reached
+        }
+
+        game.pending_shot = Some(vec![&env, x, y]);
+        let timeout = game.turn_timeout_ledgers.unwrap_or(0);
+        if timeout > 0 {
+            game.turn_deadline_ledger = Some(env.ledger().sequence() + timeout);
+        }
         env.storage().temporary().set(&key, &game);
         env.storage().temporary().extend_ttl(&key, GAME_TTL_LEDGERS, GAME_TTL_LEDGERS);
         Ok(())
@@ -289,10 +394,15 @@ impl ZkBattleshipContract {
             .get(&key)
             .ok_or(Error::GameNotFound)?;
 
-        let (x, y) = match game.pending_shot {
+        let coords = match game.pending_shot.clone() {
             Some(p) => p,
             None => return Err(Error::InvalidPhase),
         };
+        if coords.len() != 2 {
+            return Err(Error::InvalidPhase);
+        }
+        let x = coords.get(0).unwrap().try_into().unwrap();
+        let y = coords.get(1).unwrap().try_into().unwrap();
 
         let is_player1 = player == game.player1;
         let is_player2 = player == game.player2;
@@ -320,6 +430,10 @@ impl ZkBattleshipContract {
         game.pending_shot = None;
         game.current_turn = if game.current_turn == 1 { 2 } else { 1 };
 
+        let target_hits = game.target_hits.unwrap_or(TOTAL_TREASURE_CELLS);
+        let max_shots = game.max_shots_per_player.unwrap_or(0);
+        let sudden_death = game.sudden_death.unwrap_or(false);
+
         let (hits_on_defender, defender_is_p1_board) = if attacker_is_p1 {
             (
                 count_hits(&game.shots_by_player1),
@@ -332,24 +446,102 @@ impl ZkBattleshipContract {
             )
         };
 
-        if hits_on_defender >= TOTAL_TREASURE_CELLS {
+        if sudden_death && hit {
             game.phase = GamePhase::Finished;
             game.winner = Some(if defender_is_p1_board {
                 game.player2.clone()
             } else {
                 game.player1.clone()
             });
-
-            let game_hub_addr: Address = env
-                .storage()
-                .instance()
-                .get(&DataKey::GameHubAddress)
-                .expect("GameHub address not set");
-            let game_hub = GameHubClient::new(&env, &game_hub_addr);
-            let player1_won = game.winner.as_ref().unwrap() == &game.player1;
-            game_hub.end_game(&session_id, &player1_won);
+            end_game_and_save(&env, &key, &mut game, session_id);
+        } else if hits_on_defender >= target_hits {
+            game.phase = GamePhase::Finished;
+            game.winner = Some(if defender_is_p1_board {
+                game.player2.clone()
+            } else {
+                game.player1.clone()
+            });
+            end_game_and_save(&env, &key, &mut game, session_id);
+        } else if max_shots > 0 && !sudden_death {
+            let p1_shots = game.shots_by_player1.len();
+            let p2_shots = game.shots_by_player2.len();
+            if p1_shots >= max_shots && p2_shots >= max_shots {
+                let h1 = count_hits(&game.shots_by_player1);
+                let h2 = count_hits(&game.shots_by_player2);
+                if h1 > h2 {
+                    game.phase = GamePhase::Finished;
+                    game.winner = Some(game.player2.clone());
+                    end_game_and_save(&env, &key, &mut game, session_id);
+                } else if h2 > h1 {
+                    game.phase = GamePhase::Finished;
+                    game.winner = Some(game.player1.clone());
+                    end_game_and_save(&env, &key, &mut game, session_id);
+                } else {
+                    game.sudden_death = Some(true);
+                }
+            }
         }
 
+        let timeout = game.turn_timeout_ledgers.unwrap_or(0);
+        if timeout > 0 && game.winner.is_none() {
+            game.turn_deadline_ledger = Some(env.ledger().sequence() + timeout);
+        }
+
+        env.storage().temporary().set(&key, &game);
+        env.storage().temporary().extend_ttl(&key, GAME_TTL_LEDGERS, GAME_TTL_LEDGERS);
+        Ok(())
+    }
+
+    /// Claim win when the opponent timed out (ledger sequence past turn_deadline_ledger).
+    pub fn claim_timeout_win(env: Env, session_id: u32, claimant: Address) -> Result<(), Error> {
+        claimant.require_auth();
+
+        let key = DataKey::Game(session_id);
+        let mut game: Game = env
+            .storage()
+            .temporary()
+            .get(&key)
+            .ok_or(Error::GameNotFound)?;
+
+        if game.phase != GamePhase::Active {
+            return Err(Error::InvalidPhase);
+        }
+        if game.winner.is_some() {
+            return Err(Error::GameAlreadyEnded);
+        }
+
+        let timeout_ledgers = game.turn_timeout_ledgers.unwrap_or(0);
+        let deadline = match game.turn_deadline_ledger {
+            Some(d) => d,
+            None => return Err(Error::InvalidPhase),
+        };
+        if timeout_ledgers == 0 || env.ledger().sequence() <= deadline {
+            return Err(Error::InvalidPhase);
+        }
+
+        if game.pending_shot.is_some() {
+            let attacker_is_p1 = game.current_turn == 1;
+            if claimant == game.player1 && attacker_is_p1 {
+                game.winner = Some(game.player1.clone());
+            } else if claimant == game.player2 && !attacker_is_p1 {
+                game.winner = Some(game.player2.clone());
+            } else {
+                return Err(Error::NotPlayer);
+            }
+        } else {
+            let current_shooter = if game.current_turn == 1 {
+                game.player1.clone()
+            } else {
+                game.player2.clone()
+            };
+            if claimant == current_shooter {
+                return Err(Error::InvalidPhase);
+            }
+            game.winner = Some(claimant.clone());
+        }
+
+        game.phase = GamePhase::Finished;
+        end_game_and_save(&env, &key, &game, session_id);
         env.storage().temporary().set(&key, &game);
         env.storage().temporary().extend_ttl(&key, GAME_TTL_LEDGERS, GAME_TTL_LEDGERS);
         Ok(())
@@ -419,6 +611,17 @@ fn count_hits(shots: &Vec<Shot>) -> u32 {
         }
     }
     count
+}
+
+fn end_game_and_save(env: &Env, _key: &DataKey, game: &Game, session_id: u32) {
+    let game_hub_addr: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::GameHubAddress)
+        .expect("GameHub address not set");
+    let game_hub = GameHubClient::new(env, &game_hub_addr);
+    let player1_won = game.winner.as_ref().unwrap() == &game.player1;
+    game_hub.end_game(&session_id, &player1_won);
 }
 
 #[cfg(test)]

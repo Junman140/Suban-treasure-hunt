@@ -3,24 +3,29 @@ import { Keypair, TransactionBuilder, hash } from '@stellar/stellar-sdk';
 import type { ContractSigner } from '../types/signer';
 import type { WalletError } from '@stellar/stellar-sdk/contract';
 
-const SESSION_STORAGE_KEY = 'stellar-embedded-wallet-secret';
+const LOCAL_STORAGE_KEY = 'stellar-local-wallet-secret';
 
 /**
- * Embedded wallet: user-provided secret key in sessionStorage,
- * keypair derived locally, signing in-browser. Session-only (cleared when tab closes).
+ * Local wallet: keypair in localStorage, signing in-browser. No confirmations for many contract calls.
+ * Create (generate) or import secret. See smart accounts for session keys: https://docs.openzeppelin.com/stellar-contracts/accounts/smart-account
  */
 class EmbeddedWalletService {
   hasStoredSecret(): boolean {
     if (typeof window === 'undefined') return false;
-    return !!sessionStorage.getItem(SESSION_STORAGE_KEY);
+    return !!localStorage.getItem(LOCAL_STORAGE_KEY);
+  }
+
+  generateAndStore(): string {
+    if (typeof window === 'undefined') throw new Error('Local wallet is only available in the browser.');
+    const keypair = Keypair.random();
+    localStorage.setItem(LOCAL_STORAGE_KEY, keypair.secret());
+    return keypair.publicKey();
   }
 
   setSecret(secret: string): void {
     Keypair.fromSecret(secret);
-    if (typeof window === 'undefined') {
-      throw new Error('Embedded wallet is only available in the browser.');
-    }
-    sessionStorage.setItem(SESSION_STORAGE_KEY, secret);
+    if (typeof window === 'undefined') throw new Error('Local wallet is only available in the browser.');
+    localStorage.setItem(LOCAL_STORAGE_KEY, secret.trim());
   }
 
   getPublicKey(): string {
@@ -30,19 +35,15 @@ class EmbeddedWalletService {
   }
 
   private getStoredSecret(): string {
-    if (typeof window === 'undefined') {
-      throw new Error('Embedded wallet is only available in the browser.');
-    }
-    const secret = sessionStorage.getItem(SESSION_STORAGE_KEY);
-    if (!secret) {
-      throw new Error('No embedded wallet secret in session.');
-    }
+    if (typeof window === 'undefined') throw new Error('Local wallet is only available in the browser.');
+    const secret = localStorage.getItem(LOCAL_STORAGE_KEY);
+    if (!secret) throw new Error('No local wallet secret stored.');
     return secret;
   }
 
   clear(): void {
     if (typeof window === 'undefined') return;
-    sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    localStorage.removeItem(LOCAL_STORAGE_KEY);
   }
 
   getSigner(): ContractSigner {

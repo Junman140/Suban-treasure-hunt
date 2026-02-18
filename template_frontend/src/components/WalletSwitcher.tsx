@@ -13,7 +13,11 @@ export function WalletSwitcher() {
     error,
     connectDev,
     connectWallet,
+    connectEmbeddedCreate,
     connectEmbedded,
+    restoreLocalWallet,
+    clearLocalWallet,
+    hasStoredLocalWallet,
     disconnect,
     switchPlayer,
     getCurrentDevPlayer,
@@ -95,47 +99,70 @@ export function WalletSwitcher() {
           disabled={isConnecting}
           style={{ marginTop: '0.5rem' }}
         >
-          Connect wallet
+          Connect wallet (Freighter, etc.)
         </button>
-        {!showEmbeddedForm ? (
+        <div style={{ marginTop: '0.25rem' }}>
+          <span style={{ fontSize: '0.85rem', opacity: 0.9 }}>Or use a local game wallet (no confirmations):</span>
           <button
             type="button"
             className="switch-button"
-            onClick={() => setShowEmbeddedForm(true)}
+            onClick={() => connectEmbeddedCreate().catch(console.error)}
             disabled={isConnecting}
-            style={{ marginTop: '0.25rem' }}
+            style={{ marginTop: '0.25rem', marginRight: '0.25rem' }}
           >
-            Use embedded wallet
+            Create game wallet
           </button>
-        ) : (
-          <div style={{ marginTop: '0.5rem' }}>
-            <input
-              type="password"
-              placeholder="Secret key (session only)"
-              value={embeddedSecret}
-              onChange={(e) => setEmbeddedSecret(e.target.value)}
-              style={{ width: '100%', marginBottom: '0.25rem', padding: '0.25rem' }}
-              autoComplete="off"
-            />
-            <div style={{ display: 'flex', gap: '0.25rem' }}>
-              <button
-                type="button"
-                className="switch-button"
-                onClick={() => connectEmbedded(embeddedSecret).catch(console.error)}
-                disabled={isConnecting || !embeddedSecret.trim()}
-              >
-                Connect
-              </button>
-              <button
-                type="button"
-                className="switch-button"
-                onClick={() => { setShowEmbeddedForm(false); setEmbeddedSecret(''); }}
-              >
-                Cancel
-              </button>
+          {hasStoredLocalWallet() && (
+            <button
+              type="button"
+              className="switch-button"
+              onClick={() => restoreLocalWallet().catch(console.error)}
+              disabled={isConnecting}
+              style={{ marginTop: '0.25rem' }}
+            >
+              Restore game wallet
+            </button>
+          )}
+          {!showEmbeddedForm ? (
+            <button
+              type="button"
+              className="switch-button"
+              onClick={() => setShowEmbeddedForm(true)}
+              disabled={isConnecting}
+              style={{ marginTop: '0.25rem' }}
+            >
+              Import secret
+            </button>
+          ) : (
+            <div style={{ marginTop: '0.5rem' }}>
+              <input
+                type="password"
+                placeholder="Secret key (stored in browser)"
+                value={embeddedSecret}
+                onChange={(e) => setEmbeddedSecret(e.target.value)}
+                style={{ width: '100%', marginBottom: '0.25rem', padding: '0.25rem' }}
+                autoComplete="off"
+              />
+              <div style={{ display: 'flex', gap: '0.25rem' }}>
+                <button
+                  type="button"
+                  className="switch-button"
+                  onClick={() => connectEmbedded(embeddedSecret).catch(console.error)}
+                  disabled={isConnecting || !embeddedSecret.trim()}
+                >
+                  Import
+                </button>
+                <button
+                  type="button"
+                  className="switch-button"
+                  onClick={() => { setShowEmbeddedForm(false); setEmbeddedSecret(''); }}
+                >
+                  Cancel
+                </button>
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
     );
   }
@@ -172,7 +199,7 @@ export function WalletSwitcher() {
             <div className="wallet-label">
               {walletType === 'dev' && `Connected Player ${currentPlayer}`}
               {walletType === 'wallet' && 'Connected wallet'}
-              {walletType === 'embedded' && 'Connected (embedded)'}
+              {walletType === 'embedded' && 'Game wallet (local)'}
             </div>
             <div className="wallet-address">
               {publicKey ? `${publicKey.slice(0, 8)}...${publicKey.slice(-4)}` : ''}
@@ -187,7 +214,7 @@ export function WalletSwitcher() {
               Switch to Player {currentPlayer === 1 ? 2 : 1}
             </button>
           )}
-          {(walletType === 'wallet' || walletType === 'embedded') && (
+          {walletType === 'wallet' && (
             <button
               type="button"
               className="switch-button"
@@ -196,6 +223,27 @@ export function WalletSwitcher() {
             >
               Disconnect
             </button>
+          )}
+          {walletType === 'embedded' && (
+            <>
+              <button
+                type="button"
+                className="switch-button"
+                onClick={() => disconnect()}
+                disabled={isConnecting}
+              >
+                Disconnect
+              </button>
+              <button
+                type="button"
+                className="switch-button"
+                onClick={() => clearLocalWallet()}
+                disabled={isConnecting}
+                title="Remove saved wallet from this browser"
+              >
+                Clear saved wallet
+              </button>
+            </>
           )}
         </div>
       </div>

@@ -7,7 +7,11 @@ import {
   Result,
   Spec as ContractSpec,
 } from "@stellar/stellar-sdk/contract";
-import type { u32, i128, Option } from "@stellar/stellar-sdk/contract";
+import type {
+  u32,
+  i128,
+  Option,
+} from "@stellar/stellar-sdk/contract";
 export * from "@stellar/stellar-sdk";
 export * as contract from "@stellar/stellar-sdk/contract";
 export * as rpc from "@stellar/stellar-sdk/rpc";
@@ -20,7 +24,9 @@ export interface Game {
   commitment1: Option<Buffer>;
   commitment2: Option<Buffer>;
   current_turn: u32;
-  pending_shot: Option<readonly [u32, u32]>;
+  level: Option<u32>;
+  max_shots_per_player: Option<u32>;
+  pending_shot: Option<Array<u32>>;
   phase: GamePhase;
   player1: string;
   player1_points: i128;
@@ -28,6 +34,10 @@ export interface Game {
   player2_points: i128;
   shots_by_player1: Array<Shot>;
   shots_by_player2: Array<Shot>;
+  sudden_death: Option<boolean>;
+  target_hits: Option<u32>;
+  turn_deadline_ledger: Option<u32>;
+  turn_timeout_ledgers: Option<u32>;
   winner: Option<string>;
 }
 
@@ -105,6 +115,24 @@ export interface Client {
     },
     options?: MethodOptions
   ) => Promise<AssembledTransaction<Result<void>>>;
+  start_game_v2: (
+    {
+      session_id,
+      player1,
+      player2,
+      player1_points,
+      player2_points,
+      level,
+    }: {
+      session_id: u32;
+      player1: string;
+      player2: string;
+      player1_points: i128;
+      player2_points: i128;
+      level: u32;
+    },
+    options?: MethodOptions
+  ) => Promise<AssembledTransaction<Result<void>>>;
   commit_board: (
     {
       session_id,
@@ -121,10 +149,14 @@ export interface Client {
     }: { session_id: u32; player: string; hit: boolean },
     options?: MethodOptions
   ) => Promise<AssembledTransaction<Result<void>>>;
+  claim_timeout_win: (
+    { session_id, claimant }: { session_id: u32; claimant: string },
+    options?: MethodOptions
+  ) => Promise<AssembledTransaction<Result<void>>>;
 }
 
 const CONTRACT_SPEC = new ContractSpec([
-  "AAAAAQAAAAAAAAAAAAAABEdhbWUAAAAMAAAAAAAAAAtjb21taXRtZW50MQAAAAPoAAAD7gAAACAAAAAAAAAAC2NvbW1pdG1lbnQyAAAAA+gAAAPuAAAAIAAAAAAAAAAMY3VycmVudF90dXJuAAAABAAAAAAAAAAMcGVuZGluZ19zaG90AAAD6AAAA+0AAAACAAAABAAAAAQAAAAAAAAABXBoYXNlAAAAAAAH0AAAAAlHYW1lUGhhc2UAAAAAAAAAAAAAB3BsYXllcjEAAAAAEwAAAAAAAAAOcGxheWVyMV9wb2ludHMAAAAAAAsAAAAAAAAAB3BsYXllcjIAAAAAEwAAAAAAAAAOcGxheWVyMl9wb2ludHMAAAAAAAsAAAAAAAAAEHNob3RzX2J5X3BsYXllcjEAAAPqAAAH0AAAAARTaG90AAAAAAAAABBzaG90c19ieV9wbGF5ZXIyAAAD6gAAB9AAAAAEU2hvdAAAAAAAAAAGd2lubmVyAAAAAAPoAAAAEw==",
+  "AAAAAQAAAAAAAAAAAAAABEdhbWUAAAASAAAAAAAAAAtjb21taXRtZW50MQAAAAPoAAAD7gAAACAAAAAAAAAAC2NvbW1pdG1lbnQyAAAAA+gAAAPuAAAAIAAAAAAAAAAMY3VycmVudF90dXJuAAAABAAAAAAAAAAFbGV2ZWwAAAAAAAPoAAAABAAAAAAAAAAUbWF4X3Nob3RzX3Blcl9wbGF5ZXIAAAPoAAAABAAAAAAAAAAMcGVuZGluZ19zaG90AAAD6AAAA+oAAAAEAAAAAAAAAAVwaGFzZQAAAAAAB9AAAAAJR2FtZVBoYXNlAAAAAAAAAAAAAAdwbGF5ZXIxAAAAABMAAAAAAAAADnBsYXllcjFfcG9pbnRzAAAAAAALAAAAAAAAAAdwbGF5ZXIyAAAAABMAAAAAAAAADnBsYXllcjJfcG9pbnRzAAAAAAALAAAAAAAAABBzaG90c19ieV9wbGF5ZXIxAAAD6gAAB9AAAAAEU2hvdAAAAAAAAAAQc2hvdHNfYnlfcGxheWVyMgAAA+oAAAfQAAAABFNob3QAAAAAAAAADHN1ZGRlbl9kZWF0aAAAA+gAAAABAAAAAAAAAAt0YXJnZXRfaGl0cwAAAAPoAAAABAAAAAAAAAAUdHVybl9kZWFkbGluZV9sZWRnZXIAAAPoAAAABAAAAAAAAAAUdHVybl90aW1lb3V0X2xlZGdlcnMAAAPoAAAABAAAAAAAAAAGd2lubmVyAAAAAAPoAAAAEw==",
   "AAAAAQAAAAAAAAAAAAAABFNob3QAAAADAAAAAAAAAANoaXQAAAAAAQAAAAAAAAABeAAAAAAAAAQAAAAAAAAAAXkAAAAAAAAE",
   "AAAABAAAAAAAAAAAAAAABUVycm9yAAAAAAAACgAAAAAAAAAMR2FtZU5vdEZvdW5kAAAAAQAAAAAAAAAJTm90UGxheWVyAAAAAAAAAgAAAAAAAAAQR2FtZUFscmVhZHlFbmRlZAAAAAMAAAAAAAAADEludmFsaWRQaGFzZQAAAAQAAAAAAAAAC05vdFlvdXJUdXJuAAAAAAUAAAAAAAAAEEFscmVhZHlDb21taXR0ZWQAAAAGAAAAAAAAABJDb21taXRtZW50UmVxdWlyZWQAAAAAAAcAAAAAAAAAEUludmFsaWRDb29yZGluYXRlAAAAAAAACAAAAAAAAAAQU2hvdEFscmVhZHlGaXJlZAAAAAkAAAAAAAAAD1BlbmRpbmdSZXNwb25zZQAAAAAK",
   "AAAAAgAAAAAAAAAAAAAAB0RhdGFLZXkAAAAAAwAAAAEAAAAAAAAABEdhbWUAAAABAAAABAAAAAAAAAAAAAAADkdhbWVIdWJBZGRyZXNzAAAAAAAAAAAAAAAAAAVBZG1pbgAAAA==",
@@ -140,6 +172,8 @@ const CONTRACT_SPEC = new ContractSpec([
   "AAAAAAAAAKZDb21taXQgYm9hcmQuIFBsYXllciBzdWJtaXRzIGEgMzItYnl0ZSBjb21taXRtZW50IChoYXNoIG9mIHNoaXAgcGxhY2VtZW50KS4KUHJvb2YgdmVyaWZpY2F0aW9uIChCTjI1NC9Qb3NlaWRvbikgY2FuIGJlIGFkZGVkIHdoZW4gUHJvdG9jb2wgMjUgaG9zdCBmdW5jdGlvbnMgYXJlIHVzZWQuAAAAAAAMY29tbWl0X2JvYXJkAAAAAwAAAAAAAAAKc2Vzc2lvbl9pZAAAAAAABAAAAAAAAAAGcGxheWVyAAAAAAATAAAAAAAAAApjb21taXRtZW50AAAAAAPuAAAAIAAAAAEAAAPpAAAAAgAAAAM=",
   "AAAAAAAAAIdSZXNwb25kIHRvIHRoZSBwZW5kaW5nIHNob3Qgd2l0aCBoaXQgKHRydWUpIG9yIG1pc3MgKGZhbHNlKS4KRGVmZW5kZXIgbXVzdCByZXNwb25kLiBaSyBwcm9vZiB2ZXJpZmljYXRpb24gY2FuIGJlIGFkZGVkIGZvciBQcm90b2NvbCAyNS4AAAAADHJlc3BvbmRfc2hvdAAAAAMAAAAAAAAACnNlc3Npb25faWQAAAAAAAQAAAAAAAAABnBsYXllcgAAAAAAEwAAAAAAAAADaGl0AAAAAAEAAAABAAAD6QAAAAIAAAAD",
   "AAAAAAAAAAAAAAANX19jb25zdHJ1Y3RvcgAAAAAAAAIAAAAAAAAABWFkbWluAAAAAAAAEwAAAAAAAAAIZ2FtZV9odWIAAAATAAAAAA==",
+  "AAAAAAAAAGpTdGFydCBhIG5ldyBnYW1lIHdpdGggbGV2ZWwgKDEgPSBRdWljayBIdW50LCAyID0gQ2xhc3NpYyBUaW1lZCkuIEJvdGggcGxheWVycyBtdXN0IHRoZW4gY2FsbCBjb21taXRfYm9hcmQuAAAAAAANc3RhcnRfZ2FtZV92MgAAAAAAAAYAAAAAAAAACnNlc3Npb25faWQAAAAAAAQAAAAAAAAAB3BsYXllcjEAAAAAEwAAAAAAAAAHcGxheWVyMgAAAAATAAAAAAAAAA5wbGF5ZXIxX3BvaW50cwAAAAAACwAAAAAAAAAOcGxheWVyMl9wb2ludHMAAAAAAAsAAAAAAAAABWxldmVsAAAAAAAABAAAAAEAAAPpAAAAAgAAAAM=",
+  "AAAAAAAAAFJDbGFpbSB3aW4gd2hlbiB0aGUgb3Bwb25lbnQgdGltZWQgb3V0IChsZWRnZXIgc2VxdWVuY2UgcGFzdCB0dXJuX2RlYWRsaW5lX2xlZGdlcikuAAAAAAARY2xhaW1fdGltZW91dF93aW4AAAAAAAACAAAAAAAAAApzZXNzaW9uX2lkAAAAAAAEAAAAAAAAAAhjbGFpbWFudAAAABMAAAABAAAD6QAAAAIAAAAD",
 ]);
 
 export class Client extends ContractClient {

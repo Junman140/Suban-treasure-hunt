@@ -3,30 +3,47 @@ import { Keypair, TransactionBuilder, hash } from '@stellar/stellar-sdk';
 import type { ContractSigner } from '../types/signer';
 import type { WalletError } from '@stellar/stellar-sdk/contract';
 
-const SESSION_STORAGE_KEY = 'stellar-embedded-wallet-secret';
+const LOCAL_STORAGE_KEY = 'stellar-local-wallet-secret';
 
 /**
- * Embedded wallet: user-provided secret key in sessionStorage,
- * keypair derived locally, signing in-browser. Session-only (cleared when tab closes).
+ * Local wallet: keypair stored in localStorage, signing in-browser.
+ * Avoids repeated wallet confirmations for games with many contract interactions.
+ * - Create: generate new keypair with Stellar SDK, store secret in localStorage.
+ * - Import: user-provided secret, validated and stored in localStorage.
+ * For session-limited keys or smart-account session keys, see smart accounts:
+ * https://docs.openzeppelin.com/stellar-contracts/accounts/smart-account
  */
 class EmbeddedWalletService {
   /**
-   * Check if a secret is stored in the current session
+   * Check if a secret is stored (persists across sessions)
    */
   hasStoredSecret(): boolean {
     if (typeof window === 'undefined') return false;
-    return !!sessionStorage.getItem(SESSION_STORAGE_KEY);
+    return !!localStorage.getItem(LOCAL_STORAGE_KEY);
   }
 
   /**
-   * Set the user-provided secret key (validates and stores in sessionStorage)
+   * Generate a new keypair and store in localStorage (no user confirmations for signing)
+   */
+  generateAndStore(): string {
+    if (typeof window === 'undefined') {
+      throw new Error('Local wallet is only available in the browser.');
+    }
+    const keypair = Keypair.random();
+    const secret = keypair.secret();
+    localStorage.setItem(LOCAL_STORAGE_KEY, secret);
+    return keypair.publicKey();
+  }
+
+  /**
+   * Set the user-provided secret key (validates and stores in localStorage)
    */
   setSecret(secret: string): void {
-    const keypair = Keypair.fromSecret(secret);
+    Keypair.fromSecret(secret);
     if (typeof window === 'undefined') {
-      throw new Error('Embedded wallet is only available in the browser.');
+      throw new Error('Local wallet is only available in the browser.');
     }
-    sessionStorage.setItem(SESSION_STORAGE_KEY, secret);
+    localStorage.setItem(LOCAL_STORAGE_KEY, secret.trim());
   }
 
   /**
@@ -40,21 +57,21 @@ class EmbeddedWalletService {
 
   private getStoredSecret(): string {
     if (typeof window === 'undefined') {
-      throw new Error('Embedded wallet is only available in the browser.');
+      throw new Error('Local wallet is only available in the browser.');
     }
-    const secret = sessionStorage.getItem(SESSION_STORAGE_KEY);
+    const secret = localStorage.getItem(LOCAL_STORAGE_KEY);
     if (!secret) {
-      throw new Error('No embedded wallet secret in session.');
+      throw new Error('No local wallet secret stored.');
     }
     return secret;
   }
 
   /**
-   * Clear the stored secret (e.g. on disconnect)
+   * Clear the stored secret from localStorage (e.g. "Clear saved wallet")
    */
   clear(): void {
     if (typeof window === 'undefined') return;
-    sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    localStorage.removeItem(LOCAL_STORAGE_KEY);
   }
 
   /**

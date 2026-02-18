@@ -5,7 +5,8 @@ import {
   type TreasurePlacement,
 } from './zkBattleshipService';
 import { useWallet } from '@/hooks/useWallet';
-import { ZK_BATTLESHIP_CONTRACT } from '@/utils/constants';
+import { ZK_BATTLESHIP_CONTRACT, RPC_URL } from '@/utils/constants';
+import { getLatestLedgerSequence } from '@/utils/ledgerUtils';
 import { getFundedSimulationSourceAddress } from '@/utils/simulationUtils';
 import { devWalletService, DevWalletService } from '@/services/devWalletService';
 import type { Game } from './bindings';
@@ -14,6 +15,11 @@ import { BattlePhaserGame } from './phaser/BattlePhaserGame';
 
 const BOARD_SIZE = 10;
 const DEFAULT_POINTS = '0.1';
+
+const LEVELS = [
+  { value: 1 as const, label: 'Quick Hunt', desc: '3 treasures, 20 shots max, sudden death on tie' },
+  { value: 2 as const, label: 'Classic Timed', desc: '5 treasures, turn timeout ~2 min' },
+];
 
 const createRandomSessionId = (): number => {
   if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
@@ -56,6 +62,8 @@ export function ZkBattleshipGame({
   const [treasures, setTreasures] = useState<TreasurePlacement[]>([]);
   const [pendingShotCoord, setPendingShotCoord] = useState<{ x: number; y: number } | null>(null);
   const [showMiniMap, setShowMiniMap] = useState(false);
+  const [selectedLevel, setSelectedLevel] = useState<1 | 2>(1);
+  const [currentLedgerSeq, setCurrentLedgerSeq] = useState<number | null>(null);
   const actionLock = useRef(false);
   const quickstartAvailable =
     walletType === 'dev' &&
@@ -93,9 +101,9 @@ export function ZkBattleshipGame({
         } else if ((game.phase as unknown as number) === 1) {
           setPhase('battle');
         }
-        if (game.pending_shot && game.pending_shot !== null) {
-          const [x, y] = game.pending_shot;
-          setPendingShotCoord({ x: Number(x), y: Number(y) });
+        const ps = game.pending_shot;
+        if (ps && Array.isArray(ps) && ps.length >= 2) {
+          setPendingShotCoord({ x: Number(ps[0]), y: Number(ps[1]) });
         } else {
           setPendingShotCoord(null);
         }
@@ -112,6 +120,26 @@ export function ZkBattleshipGame({
       return () => clearInterval(iv);
     }
   }, [sessionId, phase, exportedAuthEntryXDR]);
+
+  // Poll current ledger for timeout countdown (Level 2)
+  useEffect(() => {
+    if (phase !== 'battle' || !gameState?.turn_deadline_ledger || !gameState?.turn_timeout_ledgers) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const seq = await getLatestLedgerSequence(RPC_URL);
+        if (!cancelled) setCurrentLedgerSeq(seq);
+      } catch {
+        if (!cancelled) setCurrentLedgerSeq(null);
+      }
+    };
+    poll();
+    const iv = setInterval(poll, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(iv);
+    };
+  }, [phase, gameState?.turn_deadline_ledger, gameState?.turn_timeout_ledgers]);
 
   const parsePoints = (v: string): bigint | null => {
     const c = v.replace(/[^\d.]/g, '');
@@ -141,14 +169,25 @@ export function ZkBattleshipGame({
         setError(null);
         const p1Points = parsePoints(DEFAULT_POINTS) || 1000000n;
         const placeholderP2 = await getFundedSimulationSourceAddress([userAddress]);
-        const authXDR = await zkBattleshipService.prepareStartGame(
-          sessionId,
-          userAddress,
-          placeholderP2,
-          p1Points,
-          p1Points,
-          getContractSigner()
-        );
+        const authXDR =
+          selectedLevel === 1 || selectedLevel === 2
+            ? await zkBattleshipService.prepareStartGameV2(
+                sessionId,
+                userAddress,
+                placeholderP2,
+                p1Points,
+                p1Points,
+                selectedLevel,
+                getContractSigner()
+              )
+            : await zkBattleshipService.prepareStartGame(
+                sessionId,
+                userAddress,
+                placeholderP2,
+                p1Points,
+                p1Points,
+                getContractSigner()
+              );
         setExportedAuthEntryXDR(authXDR);
         setSuccess('Auth entry signed! Share with Player 2.');
       } catch (e) {
@@ -213,14 +252,18 @@ export function ZkBattleshipGame({
         const sid = createRandomSessionId();
         setSessionId(sid);
         const ph = await getFundedSimulationSourceAddress([p1Addr, p2Addr]);
-        const auth = await zkBattleshipService.prepareStartGame(
-          sid,
-          p1Addr,
-          ph,
-          p,
-          p,
-          p1Signer
-        );
+        const auth =
+          selectedLevel === 1 || selectedLevel === 2
+            ? await zkBattleshipService.prepareStartGameV2(
+                sid,
+                p1Addr,
+                ph,
+                p,
+                p,
+                selectedLevel,
+                p1Signer
+              )
+            : await zkBattleshipService.prepareStartGame(sid, p1Addr, ph, p, p, p1Signer);
         const full = await zkBattleshipService.importAndSignAuthEntry(
           auth,
           p2Addr,
@@ -313,6 +356,26 @@ export function ZkBattleshipGame({
     });
   };
 
+  const handleClaimTimeoutWin = async () => {
+    await runAction(async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        await zkBattleshipService.claimTimeoutWin(
+          sessionId,
+          userAddress,
+          getContractSigner()
+        );
+        setSuccess('Timeout win claimed!');
+        await loadGameState();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Claim failed');
+      } finally {
+        setLoading(false);
+      }
+    });
+  };
+
   const isPlayer1 = gameState && gameState.player1 === userAddress;
   const isPlayer2 = gameState && gameState.player2 === userAddress;
   const haveICommitted =
@@ -346,6 +409,7 @@ export function ZkBattleshipGame({
             hit: s.hit,
           }))
         : [];
+  const targetHits = gameState?.target_hits != null ? Number(gameState.target_hits) : 5;
   const myTreasuresFound = myShots.filter((s) => s.hit).length;
   const opponentTreasuresFound = opponentShots.filter((s) => s.hit).length;
   const currentTurn = gameState ? Number(gameState.current_turn) : 0;
@@ -354,6 +418,15 @@ export function ZkBattleshipGame({
     ((currentTurn === 1 && isPlayer1) || (currentTurn === 2 && isPlayer2));
   const isDefender = pendingShotCoord !== null;
   const amITheDefender = pendingShotCoord !== null && ((currentTurn === 1 && isPlayer2) || (currentTurn === 2 && isPlayer1));
+  const turnDeadlineLedger = gameState?.turn_deadline_ledger != null ? Number(gameState.turn_deadline_ledger) : null;
+  const timeoutLedgers = gameState?.turn_timeout_ledgers != null ? Number(gameState.turn_timeout_ledgers) : 0;
+  const canClaimTimeout =
+    phase === 'battle' &&
+    timeoutLedgers > 0 &&
+    turnDeadlineLedger != null &&
+    currentLedgerSeq != null &&
+    currentLedgerSeq > turnDeadlineLedger &&
+    ((pendingShotCoord && !amITheDefender) || (!pendingShotCoord && !isMyTurn));
 
   return (
     <div className="bg-amber-50/90 backdrop-blur-xl rounded-2xl p-8 shadow-xl border-2 border-amber-300">
@@ -361,7 +434,7 @@ export function ZkBattleshipGame({
         ZK Treasure Hunt
       </h2>
       <p className="text-sm text-amber-800/80 mb-1">
-        Hide 5 treasures. Dig to find your opponent&apos;s. First to find all 5 wins.
+        Hide 5 treasures. Dig to find your opponent&apos;s. First to reach target hits wins.
       </p>
       <p className="text-xs text-amber-700/60 mb-4">
         Session ID: {sessionId}
@@ -394,6 +467,27 @@ export function ZkBattleshipGame({
               Join Game
             </button>
           </div>
+          {createMode === 'create' && (
+            <div className="p-3 bg-amber-100/70 rounded-xl border border-amber-200">
+              <p className="text-sm font-semibold text-amber-800 mb-2">Choose Level</p>
+              <div className="flex flex-wrap gap-2">
+                {LEVELS.map((lev) => (
+                  <button
+                    key={lev.value}
+                    onClick={() => setSelectedLevel(lev.value)}
+                    className={`px-4 py-2 rounded-lg text-left font-medium text-sm ${
+                      selectedLevel === lev.value
+                        ? 'bg-amber-600 text-white ring-2 ring-amber-400'
+                        : 'bg-amber-200/80 text-amber-800 hover:bg-amber-300'
+                    }`}
+                  >
+                    <span className="block font-bold">{lev.label}</span>
+                    <span className="block text-xs opacity-90">{lev.desc}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           {quickstartAvailable && (
             <button
               onClick={handleQuickStart}
@@ -491,6 +585,38 @@ export function ZkBattleshipGame({
 
       {phase === 'battle' && gameState && (
         <div className="space-y-4">
+          {/* Rules summary when level is set */}
+          {(gameState.target_hits != null || gameState.max_shots_per_player != null || gameState.turn_timeout_ledgers != null) && (
+            <div className="text-xs text-amber-700/90 mb-1 flex flex-wrap gap-x-3 gap-y-0">
+              <span>First to {targetHits} hits wins</span>
+              {gameState.max_shots_per_player != null && Number(gameState.max_shots_per_player) > 0 && (
+                <span>Max {gameState.max_shots_per_player} shots/player</span>
+              )}
+              {timeoutLedgers > 0 && (
+                <span>
+                  Turn timeout: {timeoutLedgers} ledgers
+                  {turnDeadlineLedger != null && currentLedgerSeq != null && (
+                    <span className="ml-1">
+                      (deadline ledger {turnDeadlineLedger}, current {currentLedgerSeq}
+                      {currentLedgerSeq > turnDeadlineLedger ? ' — expired' : ` — ~${Math.max(0, Math.ceil((turnDeadlineLedger - currentLedgerSeq) * 5 / 60))} min left`})
+                    </span>
+                  )}
+                </span>
+              )}
+            </div>
+          )}
+          {canClaimTimeout && (
+            <div className="p-3 bg-amber-200 border-2 border-amber-500 rounded-xl mb-2">
+              <p className="text-amber-800 font-semibold text-sm">Opponent timed out. You can claim the win.</p>
+              <button
+                onClick={handleClaimTimeoutWin}
+                disabled={loading}
+                className="mt-2 px-4 py-2 rounded-lg font-bold bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50"
+              >
+                {loading ? 'Claiming...' : 'Claim win (timeout)'}
+              </button>
+            </div>
+          )}
           {/* HUD: Turn indicator + Treasure counters */}
           <div
             className={`flex justify-between items-center p-4 rounded-xl border-2 ${
@@ -500,7 +626,7 @@ export function ZkBattleshipGame({
             <div className="flex flex-col">
               <span className="text-xs text-amber-700">Your Island</span>
               <span className="font-bold text-amber-800">
-                Opponent found: {opponentTreasuresFound}/5
+                Opponent found: {opponentTreasuresFound}/{targetHits}
               </span>
             </div>
             <div
@@ -512,7 +638,7 @@ export function ZkBattleshipGame({
             </div>
             <div className="flex flex-col text-right">
               <span className="text-xs text-amber-700">Enemy Island</span>
-              <span className="font-bold text-amber-800">You found: {myTreasuresFound}/5</span>
+              <span className="font-bold text-amber-800">You found: {myTreasuresFound}/{targetHits}</span>
             </div>
           </div>
           {isDefender && pendingShotCoord && amITheDefender && (

@@ -23,3 +23,12 @@ export async function calculateValidUntilLedger(
 
   return latestLedger.sequence + ledgersToAdd;
 }
+
+/**
+ * Get the current ledger sequence (for timeout countdown)
+ */
+export async function getLatestLedgerSequence(rpcUrl: string): Promise<number> {
+  const server = new rpc.Server(rpcUrl);
+  const latestLedger = await server.getLatestLedger();
+  return latestLedger.sequence;
+}
